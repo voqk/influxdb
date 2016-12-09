@@ -409,10 +409,38 @@ func buildExprIterator(expr Expr, ic IteratorCreator, sources Sources, opt Itera
 
 							switch expr := f.Expr.(type) {
 							case *VarRef:
-							// If the field we selected is a variable
-							// reference, then we need to find the associated
-							// selector (and ensure it is actually a selector)
-							// and build the iterator off of that.
+								// If the field we selected is a variable
+								// reference, then we need to find the associated
+								// selector (and ensure it is actually a selector)
+								// and build the iterator off of that.
+								var selector *Call
+								for s := range info.calls {
+									selector = s
+								}
+
+								// If the aggregate is not a selector, then something happened
+								// and we need to bail with a nil iterator.
+								if !IsSelector(selector) {
+									return nil, nil
+								}
+
+								subOpt, err := newIteratorOptionsSubstatement(source.Statement, opt)
+								if err != nil {
+									return nil, err
+								}
+								subOpt.Aux = []VarRef{*expr}
+
+								// Construct the selector iterator.
+								input, err := buildExprIterator(selector, ic, source.Statement.Sources, subOpt, true)
+								if err != nil {
+									return nil, err
+								}
+
+								// Create an auxiliary iterator.
+								aitr := NewAuxIterator(input, subOpt)
+								itr := aitr.Iterator(expr.Val, expr.Type)
+								aitr.Background()
+								return itr, nil
 							case *Call:
 								subOpt, err := newIteratorOptionsSubstatement(source.Statement, opt)
 								if err != nil {
