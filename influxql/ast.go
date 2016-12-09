@@ -4341,6 +4341,14 @@ func EvalType(expr Expr, sources Sources, typmap TypeMapper) DataType {
 						break
 					}
 				}
+
+				if typ == Unknown {
+					for _, d := range src.Statement.Dimensions {
+						if d, ok := d.Expr.(*VarRef); ok && expr.Val == d.Val {
+							typ = Tag
+						}
+					}
+				}
 			}
 		}
 		return typ
