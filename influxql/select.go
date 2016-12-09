@@ -357,6 +357,11 @@ func buildExprIterator(expr Expr, ic IteratorCreator, sources Sources, opt Itera
 					}
 					inputs = append(inputs, input)
 				case *SubQuery:
+					info := newSelectInfo(source.Statement)
+					if len(info.calls) > 1 && len(info.refs) > 0 {
+						return errors.New("cannot select fields when selecting multiple aggregates from subquery")
+					}
+
 					if input, err := func() (Iterator, error) {
 						// Look for the field that matches this name.
 						for _, f := range source.Statement.Fields {
@@ -366,7 +371,7 @@ func buildExprIterator(expr Expr, ic IteratorCreator, sources Sources, opt Itera
 
 							// Retrieve the select info for the substatement.
 							info := newSelectInfo(source.Statement)
-							if len(info.calls) == 0 {
+							if len(info.calls) == 0 && len(info.refs) > 0 {
 								// There are no aggregates in the subquery, so
 								// it is just a raw query. Match the auxiliary
 								// fields to the other fields and pass as-is.
@@ -401,6 +406,52 @@ func buildExprIterator(expr Expr, ic IteratorCreator, sources Sources, opt Itera
 								}
 								return buildExprIterator(f.Expr, ic, source.Statement.Sources, subOpt, false)
 							}
+
+							switch expr := f.Expr.(type) {
+							case *VarRef:
+							// If the field we selected is a variable
+							// reference, then we need to find the associated
+							// selector (and ensure it is actually a selector)
+							// and build the iterator off of that.
+							case *Call:
+								subOpt, err := newIteratorOptionsSubstatement(source.Statement, opt)
+								if err != nil {
+									return nil, err
+								}
+
+								if len(opt.Aux) > 0 {
+									subOpt.Aux = make([]VarRef, len(opt.Aux))
+									for i, ref := range opt.Aux {
+										for _, f := range source.Statement.Fields {
+											if f.Name() == ref.Val {
+												v, ok := f.Expr.(*VarRef)
+												if ok {
+													subOpt.Aux[i] = *v
+												}
+												break
+											}
+										}
+
+										if subOpt.Aux[i].Val == "" && (ref.Type == Unknown || ref.Type == Tag) {
+											for _, d := range source.Statement.Dimensions {
+												if d, ok := d.Expr.(*VarRef); ok && ref.Val == d.Val {
+													subOpt.Aux[i] = VarRef{
+														Val:  d.Val,
+														Type: Tag,
+													}
+													break
+												}
+											}
+										}
+									}
+								}
+
+								// Check if this is a selector or not and
+								// create the iterator directly.
+								selector := len(info.calls) == 1 && IsSelector(expr)
+								return buildExprIterator(expr, ic, source.Statement.Sources, subOpt, selector)
+							}
+
 							return nil, nil
 							/*
 								// Construct an iterator for this field.
