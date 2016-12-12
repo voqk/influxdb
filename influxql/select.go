@@ -113,23 +113,23 @@ func buildAuxIterators(fields Fields, ic IteratorCreator, sources Sources, opt I
 				}
 				inputs = append(inputs, input)
 			case *SubQuery:
-				fields := make([]*Field, len(opt.Aux))
+				fields := make([]*Field, 0, len(opt.Aux))
 				indexes := make([]int, len(opt.Aux))
 				offset := 0
 				for i, name := range opt.Aux {
 					// Search through the fields to find one that matches this auxiliary field.
+					var match *Field
 				FIELDS:
 					for _, f := range source.Statement.Fields {
 						if f.Name() == name.Val {
-							fields[i] = f
+							match = f
 							break
 						} else if call, ok := f.Expr.(*Call); ok && (call.Name == "top" || call.Name == "bottom") {
 							// We may match one of the arguments in "top" or "bottom".
 							if len(call.Args) > 2 {
 								for j, arg := range call.Args[1 : len(call.Args)-1] {
 									if arg, ok := arg.(*VarRef); ok && arg.Val == name.Val {
-										fmt.Println("matched", arg)
-										fields[i] = f
+										match = f
 										// Increment the offset since we are looking for the tag
 										// associated with this value rather than the value itself.
 										offset += j + 1
@@ -141,10 +141,10 @@ func buildAuxIterators(fields Fields, ic IteratorCreator, sources Sources, opt I
 					}
 
 					// Look within the dimensions and create a field if we find it.
-					if fields[i] == nil {
+					if match == nil {
 						for _, d := range source.Statement.Dimensions {
 							if d, ok := d.Expr.(*VarRef); ok && name.Val == d.Val {
-								fields[i] = &Field{
+								match = &Field{
 									Expr: &VarRef{
 										Val:  d.Val,
 										Type: Tag,
@@ -157,10 +157,42 @@ func buildAuxIterators(fields Fields, ic IteratorCreator, sources Sources, opt I
 
 					// There is no field that matches this name so signal this
 					// should be a nil iterator.
-					if fields[i] == nil {
-						fields[i] = &Field{Expr: (*nilLiteral)(nil)}
+					if match == nil {
+						match = &Field{Expr: (*nilLiteral)(nil)}
 					}
+					fields = append(fields, match)
 					indexes[i] = i + offset
+				}
+
+				// Check if we need any selectors within the selected fields.
+				// If we have an expression that relies on the selector, we
+				// need to include that even if it isn't referenced directly.
+				var selector *Field
+				for _, f := range source.Statement.Fields {
+					if IsSelector(f.Expr) {
+						selector = f
+						break
+					} else if call, ok := f.Expr.(*Call); ok && (call.Name == "top" || call.Name == "bottom") {
+						selector = f
+						break
+					}
+				}
+
+				// There is a selector in the inner query. Now check if we have that selector
+				// in the constructed fields list.
+				if selector != nil {
+					hasSelector := false
+					for _, f := range fields {
+						if _, ok := f.Expr.(*Call); ok {
+							hasSelector = true
+							break
+						}
+					}
+
+					if !hasSelector {
+						// Append the selector to the statement fields.
+						fields = append(fields, selector)
+					}
 				}
 
 				// Clone the statement and replace the fields with our custom ordering.
@@ -216,7 +248,7 @@ func buildAuxIterators(fields Fields, ic IteratorCreator, sources Sources, opt I
 		input = NewLimitIterator(input, opt)
 	}
 
-	// Wrap in an auxilary iterator to separate the fields.
+	// Wrap in an auxiliary iterator to separate the fields.
 	aitr := NewAuxIterator(input, opt)
 
 	// Generate iterators for each field.
@@ -535,7 +567,7 @@ func buildExprIterator(expr Expr, ic IteratorCreator, sources Sources, opt Itera
 								// Check if this is a selector or not and
 								// create the iterator directly.
 								selector := len(info.calls) == 1 && IsSelector(expr)
-								return buildExprIterator(expr, ic, source.Statement.Sources, subOpt, selector)
+								return buildExprIterator(e, ic, source.Statement.Sources, subOpt, selector)
 							}
 							return nil, nil
 						}
