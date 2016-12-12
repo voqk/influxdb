@@ -383,7 +383,19 @@ func buildExprIterator(expr Expr, ic IteratorCreator, sources Sources, opt Itera
 					if input, err := func() (Iterator, error) {
 						// Look for the field that matches this name.
 						for _, f := range source.Statement.Fields {
-							if f.Name() != expr.Val {
+							var e Expr
+							if f.Name() == expr.Val {
+								e = f.Expr
+							} else if call, ok := f.Expr.(*Call); ok && (call.Name == "top" || call.Name == "bottom") && len(call.Args) > 2 {
+								for _, arg := range call.Args[1 : len(call.Args)-1] {
+									if arg, ok := arg.(*VarRef); ok && arg.Val == expr.Val {
+										e = arg
+										break
+									}
+								}
+							}
+
+							if e == nil {
 								continue
 							}
 
@@ -403,7 +415,7 @@ func buildExprIterator(expr Expr, ic IteratorCreator, sources Sources, opt Itera
 									if ref.Type != Tag {
 										for _, f := range source.Statement.Fields {
 											if f.Name() == ref.Val {
-												subOpt.Aux[i] = *(f.Expr.(*VarRef))
+												subOpt.Aux[i] = *(e.(*VarRef))
 												break
 											}
 										}
@@ -422,10 +434,10 @@ func buildExprIterator(expr Expr, ic IteratorCreator, sources Sources, opt Itera
 										}
 									}
 								}
-								return buildExprIterator(f.Expr, ic, source.Statement.Sources, subOpt, false)
+								return buildExprIterator(e, ic, source.Statement.Sources, subOpt, false)
 							}
 
-							switch expr := f.Expr.(type) {
+							switch e := e.(type) {
 							case *VarRef:
 								// If the field we selected is a variable
 								// reference, then we need to find the associated
@@ -438,7 +450,7 @@ func buildExprIterator(expr Expr, ic IteratorCreator, sources Sources, opt Itera
 
 								// If the aggregate is not a selector, then something happened
 								// and we need to bail with a nil iterator.
-								if !IsSelector(selector) {
+								if !IsSelector(selector) && selector.Name != "top" && selector.Name != "bottom" {
 									return nil, nil
 								}
 
@@ -446,7 +458,35 @@ func buildExprIterator(expr Expr, ic IteratorCreator, sources Sources, opt Itera
 								if err != nil {
 									return nil, err
 								}
-								subOpt.Aux = []VarRef{*expr}
+
+								// If we have top() or bottom(), we need to
+								// fill the aux fields with what is in the
+								// function even if we aren't using the result.
+								if call, ok := f.Expr.(*Call); ok && (call.Name == "top" || call.Name == "bottom") {
+									// Prepare the auxiliary fields for this call.
+									subOpt.Aux = make([]VarRef, 0, len(call.Args)-1)
+
+									// Look for the auxiliary field inside of the call.
+									// If we can't find it, then add it to the end.
+									hasVarRef := false
+									for _, arg := range call.Args[1 : len(call.Args)-1] {
+										if arg, ok := arg.(*VarRef); ok {
+											subOpt.Aux = append(subOpt.Aux, *arg)
+											if arg.Val == e.Val {
+												hasVarRef = true
+											}
+										}
+									}
+
+									// We need to attach the actual auxiliary field we're looking
+									// for if it wasn't in the argument list.
+									// This is for SELECT top(value, 1), host.
+									if !hasVarRef {
+										subOpt.Aux = append(subOpt.Aux, *e)
+									}
+								} else {
+									subOpt.Aux = []VarRef{*e}
+								}
 
 								// Construct the selector iterator.
 								input, err := buildExprIterator(selector, ic, source.Statement.Sources, subOpt, true)
@@ -456,7 +496,7 @@ func buildExprIterator(expr Expr, ic IteratorCreator, sources Sources, opt Itera
 
 								// Create an auxiliary iterator.
 								aitr := NewAuxIterator(input, subOpt)
-								itr := aitr.Iterator(expr.Val, expr.Type)
+								itr := aitr.Iterator(e.Val, e.Type)
 								aitr.Background()
 								return itr, nil
 							case *Call:
@@ -497,25 +537,7 @@ func buildExprIterator(expr Expr, ic IteratorCreator, sources Sources, opt Itera
 								selector := len(info.calls) == 1 && IsSelector(expr)
 								return buildExprIterator(expr, ic, source.Statement.Sources, subOpt, selector)
 							}
-
 							return nil, nil
-							/*
-								// Construct an iterator for this field.
-								subOpt, err := newIteratorOptionsSubstatement(source.Statement, opt)
-								if err != nil {
-									return err
-								}
-								// Clear this if it got filled. We are not using them and don't want to confuse the iterator creator.
-								subOpt.Aux = nil
-
-								selector := IsSelector(f.Expr)
-								input, err := buildExprIterator(f.Expr, ic, source.Statement.Sources, subOpt, selector)
-								if err != nil {
-									return err
-								}
-								inputs = append(inputs, input)
-								break
-							*/
 						}
 						return nil, nil
 					}(); err != nil {
