@@ -4323,6 +4323,11 @@ type TypeMapper interface {
 func EvalType(expr Expr, sources Sources, typmap TypeMapper) DataType {
 	switch expr := expr.(type) {
 	case *VarRef:
+		// If this variable already has an assigned type, just use that.
+		if expr.Type != Unknown && expr.Type != AnyField {
+			return expr.Type
+		}
+
 		var typ DataType
 		for _, src := range sources {
 			switch src := src.(type) {
@@ -4332,6 +4337,7 @@ func EvalType(expr Expr, sources Sources, typmap TypeMapper) DataType {
 					typ = t
 				}
 			case *SubQuery:
+			FIELDS:
 				for _, f := range src.Statement.Fields {
 					if f.Name() == expr.Val {
 						t := EvalType(f.Expr, src.Statement.Sources, typmap)
@@ -4339,6 +4345,19 @@ func EvalType(expr Expr, sources Sources, typmap TypeMapper) DataType {
 							typ = t
 						}
 						break
+					} else if call, ok := f.Expr.(*Call); ok && (call.Name == "top" || call.Name == "bottom") {
+						// Handle tags selected in the top and bottom calls.
+						if len(call.Args) > 2 {
+							for _, arg := range call.Args[1 : len(call.Args)-1] {
+								if arg, ok := arg.(*VarRef); ok && arg.Val == expr.Val {
+									t := EvalType(arg, src.Statement.Sources, typmap)
+									if typ == Unknown || t < typ {
+										typ = t
+									}
+									break FIELDS
+								}
+							}
+						}
 					}
 				}
 
